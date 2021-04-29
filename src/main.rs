@@ -151,8 +151,6 @@ fn main() -> Result<()> {
     let mut crates = all_info.crates;
     crates.sort_by_key(|c| c.downloads);
     crates.reverse();
-    //    let crates = &crates.chunks(1).filter(|c| c.iter().all(|c| c.name == "amiquip")).next().unwrap(); // HACK!
-    let crates = &crates[..10]; // HACK
     let statistics = run_experiment(&opts, &crates)?;
     dbg!(&statistics);
 
