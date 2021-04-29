@@ -159,6 +159,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Use a shared target directory to reduce (but not eliminate) disk
+/// space usage and needless rebuilds.
 fn setup_cargo_config(opts: &Opts) -> Result<()> {
     let dir = opts.working_dir.join(".cargo");
     fs::create_dir_all(&dir)?;
@@ -202,6 +204,7 @@ struct ReverseDependenciesQuery {
     per_page: u64, // max of 100
 }
 
+/// Find all crates that use the target crate
 fn fetch_reverse_dependencies(opts: &Opts, client: &Client) -> Result<ReverseDependencies> {
     let cache_file = opts.working_dir.join("reverse_dependencies.json");
 
@@ -230,6 +233,8 @@ struct NameAndDownloadCount {
     downloads: u64,
 }
 
+/// Associate a name to the specific crate version that depends on the
+/// target crate.
 fn compute_name_and_download_counts(
     opts: &Opts,
     reverse_dependencies: ReverseDependencies,
@@ -272,6 +277,7 @@ struct Crate {
     _other: BTreeMap<String, serde_json::Value>,
 }
 
+/// Gets the full information for the crates, including the repository link
 fn fetch_crate_info(
     opts: &Opts,
     client: &Client,
@@ -283,6 +289,8 @@ fn fetch_crate_info(
         let mut fused_crate_info = CrateInfo::default();
         let crate_url = opts.api_base.join("./crates")?;
 
+        // crates.io limits this to 10 and doesn't handle the paging
+        // quite right, so we do this ourselves.
         for chunk in name_and_download_counts.chunks(10) {
             let mut crate_url = crate_url.clone();
             let mut query = crate_url.query_pairs_mut();
