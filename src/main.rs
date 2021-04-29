@@ -413,7 +413,12 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                     cmd.arg("clone").arg(repository_url).arg(&repository_path);
                     trace!("Cloning experiment repository {} with {:?}", c.name, cmd);
                     let status = cmd.status()?;
-                    assert!(status.success());
+
+                    if !status.success() {
+                        info!("Experiment {} could not clone the repository", c.name);
+                        statistics.setup_failures.push(c.name.to_string());
+                        continue;
+                    }
                 }
 
                 let inner_repository_path = find_cargo_toml(&repository_path, &c.name)?;
