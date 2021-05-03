@@ -173,27 +173,42 @@ fn setup_cargo_config(opts: &Opts) -> Result<()> {
     fs::write(path, config).map_err(Into::into)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ReverseDependencies {
     dependencies: Vec<Dependency>,
     versions: Vec<Version>,
+    meta: Meta,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Dependency {
     id: u64,
     version_id: u64,
     req: String, // ^0.6.10
     downloads: u64,
+
+    #[serde(flatten)]
+    _other: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Version {
     id: u64,
     #[serde(rename = "crate")]
     name: String,
     num: String,
     downloads: u64,
+
+    #[serde(flatten)]
+    _other: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct Meta {
+    total: u64,
+
+    #[serde(flatten)]
+    _other: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,21 +222,39 @@ fn fetch_reverse_dependencies(opts: &Opts, client: &Client) -> Result<ReverseDep
     let cache_file = opts.working_dir.join("reverse_dependencies.json");
 
     use_cached_file_or_else(cache_file, || {
-        let revdep_path = format!("./crates/{}/reverse_dependencies", &opts.crate_name);
-        let mut revdep_url = opts.api_base.join(&revdep_path)?;
-
-        // TODO: paging
-        let q = ReverseDependenciesQuery {
+        let mut q = ReverseDependenciesQuery {
             page: 1,
             per_page: 100,
         };
-        let q = serde_urlencoded::to_string(&q)?;
+        let mut fused_reverse_dependencies = ReverseDependencies::default();
 
-        revdep_url.set_query(Some(&q));
+        loop {
+            let revdep_path = format!("./crates/{}/reverse_dependencies", &opts.crate_name);
+            let mut revdep_url = opts.api_base.join(&revdep_path)?;
 
-        trace!("Making request to {}", revdep_url);
-        let response = client.get(revdep_url).send()?;
-        response.bytes().map(|b| b.to_vec()).map_err(Into::into)
+            let qs = serde_urlencoded::to_string(&q)?;
+            revdep_url.set_query(Some(&qs));
+
+            trace!("Making request to {}", revdep_url);
+            let response = client.get(revdep_url).send()?;
+            let mut chunk: ReverseDependencies = serde_json::from_slice(&response.bytes()?)?;
+
+            fused_reverse_dependencies
+                .dependencies
+                .append(&mut chunk.dependencies);
+            fused_reverse_dependencies
+                .versions
+                .append(&mut chunk.versions);
+            fused_reverse_dependencies.meta = chunk.meta;
+
+            if q.page * q.per_page < fused_reverse_dependencies.meta.total {
+                q.page += 1;
+            } else {
+                break;
+            }
+        }
+
+        serde_json::to_vec(&fused_reverse_dependencies).map_err(Into::into)
     })
 }
 
@@ -240,6 +273,7 @@ fn compute_name_and_download_counts(
     let ReverseDependencies {
         dependencies,
         versions,
+        meta: _,
     } = reverse_dependencies;
     let mut version_map: BTreeMap<_, _> = versions.into_iter().map(|v| (v.id, v)).collect();
 
