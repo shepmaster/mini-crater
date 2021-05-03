@@ -412,7 +412,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             trace!("Reusing experiment {}", c.name);
         } else {
             let mut cmd = Command::new("cargo");
-            cmd.args(&["new", "--bin"]).arg(&c.name);
+            cmd.args(&["new", "--bin", "--name"])
+                .arg(format!("experiment-{}", c.name))
+                .arg(&c.name);
             trace!("Creating experiment {} with {:?}", c.name, cmd);
             let status = cmd.status()?;
             assert!(status.success());
