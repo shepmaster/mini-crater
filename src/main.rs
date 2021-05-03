@@ -455,7 +455,13 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                     }
                 }
 
-                let inner_repository_path = find_cargo_toml(&repository_path, &c.name)?;
+                let inner_repository_path = match find_cargo_toml(&repository_path, &c.name) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        statistics.setup_failures.push(c.name.to_string());
+                        continue;
+                    }
+                };
 
                 let dep = format!(
                     "{name} = {{ path = '{repository_path}' }}\n",
@@ -570,11 +576,12 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
         }
     }
 
-    panic!(
+    Err(format!(
         "Could not find a suitable Cargo toml for {} in {}",
         name,
         root_dir.display()
     )
+    .into())
 }
 
 fn prepare_command(
