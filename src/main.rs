@@ -5,7 +5,8 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsStr,
-    fs, io,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -110,6 +111,7 @@ impl Opts {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let original_dir = env::current_dir()?;
 
     let opts = Opts::enhance(argh::from_env())?;
 
@@ -153,6 +155,11 @@ fn main() -> Result<()> {
     crates.reverse();
     let statistics = run_experiment(&opts, &crates)?;
     dbg!(&statistics);
+
+    env::set_current_dir(original_dir)?;
+
+    let mut results = File::create("results.json")?;
+    serde_json::to_writer(&mut results, &statistics)?;
 
     Ok(())
 }
@@ -366,7 +373,7 @@ where
     serde_json::from_slice(&data).map_err(Into::into)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 struct Statistics {
     setup_successes: Vec<String>,
     setup_failures: Vec<String>,
