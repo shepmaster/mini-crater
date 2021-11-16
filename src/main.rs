@@ -405,6 +405,8 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
     }
 
     for c in crates {
+        println!("Beginning experiment for {}", c.name);
+
         env::set_current_dir(&experiments_dir)?;
 
         // Create our calling project
