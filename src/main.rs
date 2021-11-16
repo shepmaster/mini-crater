@@ -412,7 +412,7 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             trace!("Reusing experiment {}", c.name);
         } else {
             let mut cmd = Command::new("cargo");
-            cmd.args(&["new", "--bin", "--name"])
+            cmd.args(&["new", "--quiet", "--bin", "--name"])
                 .arg(format!("experiment-{}", c.name))
                 .arg(&c.name);
             trace!("Creating experiment {} with {:?}", c.name, cmd);
@@ -453,7 +453,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                 } else {
                     let mut cmd = Command::new("git");
 
-                    cmd.arg("clone").arg(repository_url).arg(&repository_path);
+                    cmd.args(&["clone", "--quiet"])
+                        .arg(repository_url)
+                        .arg(&repository_path);
                     trace!("Cloning experiment repository {} with {:?}", c.name, cmd);
                     let status = cmd.status()?;
 
@@ -603,7 +605,7 @@ fn prepare_command(
         Some(cmd) => Command::new(cmd),
         None => {
             let mut cmd = Command::new("cargo");
-            cmd.args(&["build"]);
+            cmd.args(&["build", "--quiet"]);
             cmd
         }
     };
