@@ -48,7 +48,8 @@ struct CommandLineOpts {
     #[argh(positional)]
     crate_name: String,
 
-    /// the version of the crate to look for reverse dependencies of
+    /// the version of the crate to look for reverse dependencies
+    /// of. Performs simple substring comparison
     #[argh(option)]
     version: String,
 
@@ -60,7 +61,8 @@ struct CommandLineOpts {
     #[argh(option, default = "TempDir::new().unwrap().into_path()")]
     working_dir: PathBuf,
 
-    /// checkout the repository instead of using a released version
+    /// checkout the repository for dependant instead of using a
+    /// released version
     #[argh(switch)]
     use_git: bool,
 
