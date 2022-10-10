@@ -270,6 +270,7 @@ fn fetch_reverse_dependencies(opts: &Opts, client: &Client) -> Result<ReverseDep
 #[derive(Debug)]
 struct NameAndDownloadCount {
     name: String,
+    #[allow(unused)]
     downloads: u64,
 }
 
