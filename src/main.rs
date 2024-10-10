@@ -1,4 +1,5 @@
 use argh::FromArgs;
+use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -73,6 +74,10 @@ struct CommandLineOpts {
     /// alternate command to run as the second step
     #[argh(option)]
     post_command: Option<String>,
+
+    /// only run experiments on crates matching this regex
+    #[argh(option)]
+    select: Option<Regex>,
 }
 
 struct Opts {
@@ -84,6 +89,7 @@ struct Opts {
     use_git: bool,
     pre_command: Option<String>,
     post_command: Option<String>,
+    select: Option<Regex>,
 }
 
 impl Opts {
@@ -97,6 +103,7 @@ impl Opts {
             use_git,
             pre_command,
             post_command,
+            select,
         } = cmd;
         Ok(Self {
             api_base,
@@ -107,6 +114,7 @@ impl Opts {
             use_git,
             pre_command,
             post_command,
+            select,
         })
     }
 }
@@ -408,6 +416,13 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
     }
 
     for c in crates {
+        if let Some(select) = &opts.select {
+            if !select.is_match(&c.name) {
+                trace!("Skipping {} as it does not match the regex", c.name);
+                continue;
+            }
+        }
+
         println!("Beginning experiment for {}", c.name);
 
         env::set_current_dir(&experiments_dir)?;

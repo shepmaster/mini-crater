@@ -438,6 +438,7 @@ name = "mini-crater"
 version = "0.1.0"
 dependencies = [
  "argh",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
