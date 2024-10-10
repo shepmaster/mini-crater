@@ -33,7 +33,7 @@ impl FromStr for PatchArg {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (name, path) = s
             .split_once("=")
-            .ok_or_else(|| "Not a valid patch name/path pair")?;
+            .ok_or("Not a valid patch name/path pair")?;
         Ok(Self {
             name: name.into(),
             path: path.into(),
@@ -172,7 +172,7 @@ fn setup_cargo_config(opts: &Opts) -> Result<()> {
     let dir = opts.working_dir.join(".cargo");
     fs::create_dir_all(&dir)?;
 
-    let path = dir.join("config");
+    let path = dir.join("config.toml");
     let config = format!(
         "[build]
          target-dir = '{}/target'",
@@ -417,7 +417,7 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             trace!("Reusing experiment {}", c.name);
         } else {
             let mut cmd = Command::new("cargo");
-            cmd.args(&["new", "--quiet", "--bin", "--name"])
+            cmd.args(["new", "--quiet", "--bin", "--name"])
                 .arg(format!("experiment-{}", c.name))
                 .arg(&c.name);
             trace!("Creating experiment {} with {:?}", c.name, cmd);
@@ -445,57 +445,55 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
         let dep_prefix = format!("{name} =", name = c.name);
         if cargo_toml_contents.contains(&dep_prefix) {
             trace!("Reusing dependency for experiment {}", c.name);
-        } else {
-            if let Some((repository_url, repository_path)) = &repository_info {
-                trace!("Adding git dependency for experiment {}", c.name);
+        } else if let Some((repository_url, repository_path)) = &repository_info {
+            trace!("Adding git dependency for experiment {}", c.name);
 
-                if repository_path.exists() {
-                    trace!(
-                        "Reusing experiment {} repository at {}",
-                        c.name,
-                        repository_path.display(),
-                    );
-                } else {
-                    let mut cmd = Command::new("git");
-
-                    cmd.args(&["clone", "--quiet"])
-                        .arg(repository_url)
-                        .arg(&repository_path);
-                    trace!("Cloning experiment repository {} with {:?}", c.name, cmd);
-                    let status = cmd.status()?;
-
-                    if !status.success() {
-                        info!("Experiment {} could not clone the repository", c.name);
-                        statistics.setup_failures.push(c.name.to_string());
-                        continue;
-                    }
-                }
-
-                let inner_repository_path = match find_cargo_toml(&repository_path, &c.name) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        statistics.setup_failures.push(c.name.to_string());
-                        continue;
-                    }
-                };
-
-                let dep = format!(
-                    "{name} = {{ path = '{repository_path}' }}\n",
-                    name = c.name,
-                    repository_path = inner_repository_path.display(),
+            if repository_path.exists() {
+                trace!(
+                    "Reusing experiment {} repository at {}",
+                    c.name,
+                    repository_path.display(),
                 );
-                cargo_toml_contents.push_str(&dep);
-                fs::write(&cargo_toml, &cargo_toml_contents)?;
             } else {
-                trace!("Adding crates.io dependency for experiment {}", c.name);
-                let dep = format!(
-                    "{name} = '={version}'\n",
-                    name = c.name,
-                    version = c.max_version,
-                );
-                cargo_toml_contents.push_str(&dep);
-                fs::write(&cargo_toml, &cargo_toml_contents)?;
+                let mut cmd = Command::new("git");
+
+                cmd.args(["clone", "--quiet"])
+                    .arg(repository_url)
+                    .arg(repository_path);
+                trace!("Cloning experiment repository {} with {:?}", c.name, cmd);
+                let status = cmd.status()?;
+
+                if !status.success() {
+                    info!("Experiment {} could not clone the repository", c.name);
+                    statistics.setup_failures.push(c.name.to_string());
+                    continue;
+                }
             }
+
+            let inner_repository_path = match find_cargo_toml(repository_path, &c.name) {
+                Ok(p) => p,
+                Err(_) => {
+                    statistics.setup_failures.push(c.name.to_string());
+                    continue;
+                }
+            };
+
+            let dep = format!(
+                "{name} = {{ path = '{repository_path}' }}\n",
+                name = c.name,
+                repository_path = inner_repository_path.display(),
+            );
+            cargo_toml_contents.push_str(&dep);
+            fs::write(&cargo_toml, &cargo_toml_contents)?;
+        } else {
+            trace!("Adding crates.io dependency for experiment {}", c.name);
+            let dep = format!(
+                "{name} = '={version}'\n",
+                name = c.name,
+                version = c.max_version,
+            );
+            cargo_toml_contents.push_str(&dep);
+            fs::write(&cargo_toml, &cargo_toml_contents)?;
         }
 
         statistics.setup_successes.push(c.name.to_string());
@@ -610,7 +608,7 @@ fn prepare_command(
         Some(cmd) => Command::new(cmd),
         None => {
             let mut cmd = Command::new("cargo");
-            cmd.args(&["build", "--quiet"]);
+            cmd.args(["build", "--quiet"]);
             cmd
         }
     };
