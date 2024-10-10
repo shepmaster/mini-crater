@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
 };
 use tempfile::TempDir;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use url::Url;
 use walkdir::WalkDir;
 
@@ -55,7 +55,7 @@ struct CommandLineOpts {
     /// the version of the crate to look for reverse dependencies
     /// of. Performs simple substring comparison
     #[argh(option)]
-    version: String,
+    version: semver::Version,
 
     /// a patch entry as found in Cargo.toml. `name = {{ path = "..." }}`
     #[argh(option)]
@@ -86,7 +86,7 @@ struct CommandLineOpts {
 struct Opts {
     api_base: Url,
     crate_name: String,
-    version: String,
+    version: semver::Version,
     patch: Vec<PatchArg>,
     working_dir: PathBuf,
     use_git: bool,
@@ -204,7 +204,7 @@ struct ReverseDependencies {
 struct Dependency {
     id: u64,
     version_id: u64,
-    req: String, // ^0.6.10
+    req: semver::VersionReq, // ^0.6.10
     downloads: u64,
 
     #[serde(flatten)]
@@ -291,17 +291,30 @@ fn compute_name_and_download_counts(
     opts: &Opts,
     reverse_dependencies: ReverseDependencies,
 ) -> Vec<NameAndDownloadCount> {
+    use semver::Op;
+
     let ReverseDependencies {
-        dependencies,
+        mut dependencies,
         versions,
         meta: _,
     } = reverse_dependencies;
     let mut version_map: BTreeMap<_, _> = versions.into_iter().map(|v| (v.id, v)).collect();
 
-    // TODO: better semver string application
+    for d in &mut dependencies {
+        for c in &mut d.req.comparators {
+            if c.op == Op::Exact {
+                warn!(
+                    "ignoring exact semver requirement in {}",
+                    &version_map[&d.version_id].name
+                );
+                c.op = Op::Caret;
+            }
+        }
+    }
+
     dependencies
         .into_iter()
-        .filter(|d| d.req.contains(&opts.version))
+        .filter(|d| d.req.matches(&opts.version))
         .map(|d| {
             let version = version_map
                 .remove(&d.version_id)
