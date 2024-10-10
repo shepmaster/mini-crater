@@ -445,6 +445,10 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             Ok::<_, Error>(())
         };
 
+        // Reset any patches, in case we are rerunning
+        cargo_toml.patch = None;
+        write_cargo_toml(&cargo_toml)?;
+
         let repository_info = match (opts.use_git, &c.repository) {
             (true, Some(repo)) => Some((repo, checkouts_dir.join(c_pkg_name.as_ref()))),
             (true, None) => {
@@ -533,7 +537,6 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             continue;
         }
 
-        // FUTURE: remove patches when rerunning?
         let patch = cargo_toml.patch.get_or_insert_default();
         let patch_crates_io = patch.entry("crates-io".to_owned()).or_default();
 
