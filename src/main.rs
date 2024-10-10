@@ -25,23 +25,23 @@ const API_BASE: &str = "https://crates.io/api/v1/";
 type Error = Box<dyn std::error::Error>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PatchArg {
-    name: String,
-    path: PathBuf,
+    name: PackageName,
+    dep: TomlDependency,
 }
 
 impl FromStr for PatchArg {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (name, path) = s
-            .split_once("=")
-            .ok_or("Not a valid patch name/path pair")?;
-        Ok(Self {
-            name: name.into(),
-            path: path.into(),
-        })
+        let mut keys: BTreeMap<PackageName, TomlDependency> = toml::from_str(s)?;
+        let (name, dep) = keys.pop_first().ok_or("No patch provided")?;
+        if !keys.is_empty() {
+            Err("Too many patches found")?;
+        }
+
+        Ok(Self { name, dep })
     }
 }
 
@@ -57,7 +57,7 @@ struct CommandLineOpts {
     #[argh(option)]
     version: String,
 
-    /// the crate name and path to use to patch, formatted as `name=path`
+    /// a patch entry as found in Cargo.toml. `name = {{ path = "..." }}`
     #[argh(option)]
     patch: Vec<PatchArg>,
 
@@ -445,7 +445,8 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             Ok::<_, Error>(())
         };
 
-        // Reset any patches, in case we are rerunning
+        // Reset any dependencies or patches, in case we are rerunning
+        cargo_toml.dependencies = None;
         cargo_toml.patch = None;
         write_cargo_toml(&cargo_toml)?;
 
@@ -537,21 +538,36 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             continue;
         }
 
+        let dependencies = cargo_toml.dependencies.get_or_insert_default();
         let patch = cargo_toml.patch.get_or_insert_default();
         let patch_crates_io = patch.entry("crates-io".to_owned()).or_default();
 
-        for p in &opts.patch {
-            trace!("Adding patch for experiment {c_pkg_name}");
+        for mut p in opts.patch.clone() {
+            trace!("Adding patch {} for experiment {c_pkg_name}", p.name);
 
-            let p_pkg_name = PackageName::new(p.name.to_owned())?;
-            let path = p.path.to_str().ok_or("Path was not UTF-8")?.to_owned();
+            // You can't set `features` / `default-features` in the
+            // `[patch]` section. Instead, we add our own dependency
+            // on the crate and set them there.
+            if let TomlDependency::Detailed(p_dep) = &mut p.dep {
+                if p_dep.default_features.is_some() {
+                    unimplemented!("Patch is trying to set `default-features`");
+                }
 
-            let patch_dep = TomlDetailedDependency {
-                path: Some(path),
-                ..Default::default()
-            };
+                if let Some(feat) = p_dep.features.take() {
+                    let dep = dependencies.entry(p.name.clone()).or_insert_with(|| {
+                        InheritableDependency::Value(TomlDependency::Detailed(Default::default()))
+                    });
+                    if let InheritableDependency::Value(TomlDependency::Detailed(dep)) = dep {
+                        dep.version = Some("*".into());
+                        dep.default_features = Some(false);
+                        dep.features = Some(feat);
+                    } else {
+                        unimplemented!("Dependency is not detailed");
+                    }
+                }
+            }
 
-            patch_crates_io.insert(p_pkg_name, TomlDependency::Detailed(patch_dep));
+            patch_crates_io.insert(p.name, p.dep);
         }
         write_cargo_toml(&cargo_toml)?;
 
