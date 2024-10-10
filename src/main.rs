@@ -1,4 +1,7 @@
 use argh::FromArgs;
+use cargo_util_schemas::manifest::{
+    InheritableDependency, PackageName, TomlDependency, TomlDetailedDependency, TomlManifest,
+};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -403,18 +406,6 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
     let checkouts_dir = opts.working_dir.join("checkouts");
     fs::create_dir_all(&checkouts_dir)?;
 
-    let mut cargo_toml_patch = "\n[patch.crates-io]\n".to_string();
-    for p in &opts.patch {
-        use std::fmt::Write;
-        writeln!(
-            cargo_toml_patch,
-            "{name} = {{ path = '{path}' }}",
-            name = p.name,
-            path = p.path.display(),
-        )
-        .unwrap();
-    }
-
     for c in crates {
         if let Some(select) = &opts.select {
             if !select.is_match(&c.name) {
@@ -423,50 +414,54 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             }
         }
 
-        println!("Beginning experiment for {}", c.name);
+        let c_pkg_name = PackageName::new(c.name.to_owned())?;
+        println!("Beginning experiment for {c_pkg_name}");
 
         env::set_current_dir(&experiments_dir)?;
 
         // Create our calling project
-        if Path::new(&c.name).exists() {
-            trace!("Reusing experiment {}", c.name);
+        if Path::new(c_pkg_name.as_ref()).exists() {
+            trace!("Reusing experiment {c_pkg_name}");
         } else {
             let mut cmd = Command::new("cargo");
             cmd.args(["new", "--quiet", "--bin", "--name"])
-                .arg(format!("experiment-{}", c.name))
-                .arg(&c.name);
-            trace!("Creating experiment {} with {:?}", c.name, cmd);
+                .arg(format!("experiment-{}", c_pkg_name))
+                .arg(c_pkg_name.as_ref());
+            trace!("Creating experiment {c_pkg_name} with {cmd:?}");
             let status = cmd.status()?;
             assert!(status.success());
         }
 
-        let this_experiment_dir = experiments_dir.join(&c.name);
+        let this_experiment_dir = experiments_dir.join(c_pkg_name.as_ref());
         env::set_current_dir(&this_experiment_dir)?;
 
-        let cargo_toml = this_experiment_dir.join("Cargo.toml");
-        let mut cargo_toml_contents = fs::read_to_string(&cargo_toml)?;
+        let cargo_toml_path = this_experiment_dir.join("Cargo.toml");
+        let cargo_toml = fs::read_to_string(&cargo_toml_path)?;
+        let mut cargo_toml: TomlManifest = toml::from_str(&cargo_toml)?;
+
+        let write_cargo_toml = |cargo_toml: &TomlManifest| {
+            let cargo_toml = toml::to_string_pretty(&cargo_toml)?;
+            fs::write(&cargo_toml_path, cargo_toml)?;
+            Ok::<_, Error>(())
+        };
 
         let repository_info = match (opts.use_git, &c.repository) {
-            (true, Some(repo)) => Some((repo, checkouts_dir.join(&c.name))),
+            (true, Some(repo)) => Some((repo, checkouts_dir.join(c_pkg_name.as_ref()))),
             (true, None) => {
-                info!("Experiment {} has no repository to clone", c.name);
-                statistics.setup_failures.push(c.name.to_string());
+                info!("Experiment {c_pkg_name} has no repository to clone");
+                statistics.setup_failures.push(c_pkg_name.to_string());
                 continue;
             }
             (false, _) => None,
         };
 
-        // TODO: Something better with parsing the TOML
-        let dep_prefix = format!("{name} =", name = c.name);
-        if cargo_toml_contents.contains(&dep_prefix) {
-            trace!("Reusing dependency for experiment {}", c.name);
-        } else if let Some((repository_url, repository_path)) = &repository_info {
-            trace!("Adding git dependency for experiment {}", c.name);
+        let dependencies = cargo_toml.dependencies.get_or_insert_default();
+        let dep = if let Some((repository_url, repository_path)) = &repository_info {
+            trace!("Adding git dependency for experiment {c_pkg_name}");
 
             if repository_path.exists() {
                 trace!(
-                    "Reusing experiment {} repository at {}",
-                    c.name,
+                    "Reusing experiment {c_pkg_name} repository at {}",
                     repository_path.display(),
                 );
             } else {
@@ -475,107 +470,106 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                 cmd.args(["clone", "--quiet"])
                     .arg(repository_url)
                     .arg(repository_path);
-                trace!("Cloning experiment repository {} with {:?}", c.name, cmd);
+                trace!("Cloning experiment repository {c_pkg_name} with {cmd:?}");
                 let status = cmd.status()?;
 
                 if !status.success() {
-                    info!("Experiment {} could not clone the repository", c.name);
-                    statistics.setup_failures.push(c.name.to_string());
+                    info!("Experiment {c_pkg_name} could not clone the repository");
+                    statistics.setup_failures.push(c_pkg_name.to_string());
                     continue;
                 }
             }
 
-            let inner_repository_path = match find_cargo_toml(repository_path, &c.name) {
+            let inner_repository_path = match find_cargo_toml(repository_path, c_pkg_name.as_ref())
+            {
                 Ok(p) => p,
                 Err(_) => {
-                    statistics.setup_failures.push(c.name.to_string());
+                    statistics.setup_failures.push(c_pkg_name.to_string());
                     continue;
                 }
             };
 
-            let dep = format!(
-                "{name} = {{ path = '{repository_path}' }}\n",
-                name = c.name,
-                repository_path = inner_repository_path.display(),
-            );
-            cargo_toml_contents.push_str(&dep);
-            fs::write(&cargo_toml, &cargo_toml_contents)?;
+            let path = inner_repository_path
+                .to_str()
+                .ok_or("Path was not UTF-8")?
+                .to_owned();
+            TomlDetailedDependency {
+                path: Some(path),
+                ..Default::default()
+            }
         } else {
-            trace!("Adding crates.io dependency for experiment {}", c.name);
-            let dep = format!(
-                "{name} = '={version}'\n",
-                name = c.name,
-                version = c.max_version,
-            );
-            cargo_toml_contents.push_str(&dep);
-            fs::write(&cargo_toml, &cargo_toml_contents)?;
-        }
+            trace!("Adding crates.io dependency for experiment {c_pkg_name}");
 
-        statistics.setup_successes.push(c.name.to_string());
+            TomlDetailedDependency {
+                version: Some(format!("={}", c.max_version)),
+                ..Default::default()
+            }
+        };
+
+        dependencies.insert(
+            c_pkg_name.clone(),
+            InheritableDependency::Value(TomlDependency::Detailed(dep)),
+        );
+
+        write_cargo_toml(&cargo_toml)?;
+
+        statistics.setup_successes.push(c_pkg_name.to_string());
 
         let repository_path = repository_info.as_ref().map(|(_, p)| p);
 
         let mut pre_command = prepare_command(
             opts.pre_command.as_deref(),
             &opts.working_dir,
-            &c.name,
+            c_pkg_name.as_ref(),
             repository_path.as_ref(),
         );
-        trace!(
-            "Running pre command for experiment {}: {:?}",
-            c.name,
-            pre_command
-        );
+        trace!("Running pre command for experiment {c_pkg_name}: {pre_command:?}");
         let status = pre_command.status()?;
         if status.success() {
-            statistics.original_successes.push(c.name.to_string());
+            statistics.original_successes.push(c_pkg_name.to_string());
         } else {
-            info!("Experiment {} failed original build", c.name);
-            statistics.original_failures.push(c.name.to_string());
+            info!("Experiment {c_pkg_name} failed original build");
+            statistics.original_failures.push(c_pkg_name.to_string());
             continue;
         }
 
-        if cargo_toml_contents.contains("patch.crates-io") {
-            trace!("Reusing patch for experiment {}", c.name);
-        } else {
-            trace!("Adding patch for experiment {}", c.name);
+        // FUTURE: remove patches when rerunning?
+        let patch = cargo_toml.patch.get_or_insert_default();
+        let patch_crates_io = patch.entry("crates-io".to_owned()).or_default();
 
-            cargo_toml_contents.push_str(&cargo_toml_patch);
-            fs::write(&cargo_toml, &cargo_toml_contents)?;
+        for p in &opts.patch {
+            trace!("Adding patch for experiment {c_pkg_name}");
+
+            let p_pkg_name = PackageName::new(p.name.to_owned())?;
+            let path = p.path.to_str().ok_or("Path was not UTF-8")?.to_owned();
+
+            let patch_dep = TomlDetailedDependency {
+                path: Some(path),
+                ..Default::default()
+            };
+
+            patch_crates_io.insert(p_pkg_name, TomlDependency::Detailed(patch_dep));
         }
+        write_cargo_toml(&cargo_toml)?;
 
         let mut post_command = prepare_command(
             opts.post_command.as_deref(),
             &opts.working_dir,
-            &c.name,
+            c_pkg_name.as_ref(),
             repository_path.as_ref(),
         );
-        trace!(
-            "Running post command for experiment {}: {:?}",
-            c.name,
-            post_command
-        );
+        trace!("Running post command for experiment {c_pkg_name}: {post_command:?}");
         let status = post_command.status()?;
         if status.success() {
-            statistics.experiment_successes.push(c.name.to_string());
+            statistics.experiment_successes.push(c_pkg_name.to_string());
         } else {
-            info!("Experiment {} failed second build", c.name);
-            statistics.experiment_failures.push(c.name.to_string());
+            info!("Experiment {c_pkg_name} failed second build");
+            statistics.experiment_failures.push(c_pkg_name.to_string());
             continue;
         }
     }
 
     Ok(statistics)
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoToml {
-    package: Option<CargoTomlPackage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoTomlPackage {
-    name: String,
 }
 
 fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
@@ -595,10 +589,10 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
             name
         );
         let file = fs::read_to_string(&cargo_toml_path)?;
-        let cargo_toml: CargoToml = toml::from_str(&file)?;
+        let cargo_toml: TomlManifest = toml::from_str(&file)?;
 
         if let Some(package) = cargo_toml.package {
-            if package.name == name {
+            if package.name.as_ref() == name {
                 cargo_toml_path.pop();
                 return Ok(cargo_toml_path);
             }
