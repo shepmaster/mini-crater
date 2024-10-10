@@ -581,8 +581,8 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
             cargo_toml_path.display(),
             name
         );
-        let file = fs::read(&cargo_toml_path)?;
-        let cargo_toml: CargoToml = toml::from_slice(&file)?;
+        let file = fs::read_to_string(&cargo_toml_path)?;
+        let cargo_toml: CargoToml = toml::from_str(&file)?;
 
         if let Some(package) = cargo_toml.package {
             if package.name == name {
