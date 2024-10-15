@@ -8,7 +8,7 @@ edition = "2018"
 [dependencies]
 clap = { version = "4.5.20", features = ["derive", "string"] }
 color-eyre = "0.6.3"
-# https://github.com/theduke/crates-io-api/pull/74
+# https://github.com/theduke/crates-io-api/pull/74 adds support for ids[] query parameter
 crates_io_api = { version = "0.11.0", git = "https://github.com/theduke/crates-io-api/", rev = "refs/pull/74/head" }
 serde = { version = "1.0.210", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.128", default-features = false }
