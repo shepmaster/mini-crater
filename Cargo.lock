@@ -627,12 +627,10 @@ dependencies = [
  "crates_io_api",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "tempfile",
  "toml",
  "tracing",
  "tracing-subscriber",
- "url",
  "walkdir",
 ]
 
