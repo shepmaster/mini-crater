@@ -143,7 +143,7 @@ fn setup_cargo_config(working_dir: &Path) -> Result<()> {
     let dir = working_dir.join(".cargo");
     fs::create_dir_all(&dir)?;
 
-    let path = dir.join("config");
+    let path = dir.join("config.toml");
     let config = format!(
         "[build]
          target-dir = '{}/target'",
