@@ -15,6 +15,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
+use tempfile::TempDir;
 use tracing::{info, level_filters::LevelFilter, trace};
 use tracing_subscriber::EnvFilter;
 use walkdir::WalkDir;
@@ -62,7 +63,7 @@ struct Opts {
     patch: Vec<PatchArg>,
 
     /// the directory to compile in.
-    #[arg(long, short, default_value = "TempDir::new().unwrap().into_path()")]
+    #[arg(long, short, default_value = TempDir::new().unwrap().path().to_string_lossy().to_string())]
     working_dir: PathBuf,
 
     /// checkout the repository for dependant instead of using a
@@ -77,6 +78,10 @@ struct Opts {
     /// alternate command to run as the second step
     #[arg(long, alias = "post")]
     post_command: Option<String>,
+
+    /// dry run, don't actually run the experiments
+    #[arg(long, short = 'n')]
+    dry_run: bool,
 }
 
 fn main() -> Result<()> {
@@ -266,7 +271,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
 
     for c in crates {
         println!("Beginning experiment for {}", c.name);
-
+        if opts.dry_run {
+            continue;
+        }
         env::set_current_dir(&experiments_dir)?;
 
         // Create our calling project
