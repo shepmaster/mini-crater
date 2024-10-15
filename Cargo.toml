@@ -6,14 +6,18 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-argh = { version = "0.1.4", default-features = false }
-reqwest = { version = "0.11.3", default-features = false, features = ["blocking", "default-tls"] }
-serde = { version = "1.0.125", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.64", default-features = false }
-serde_urlencoded = { version = "0.7.0", default-features = false }
-tempfile = { version = "3.2.0", default-features = false }
-toml = { version = "0.5.8", default-features = false }
-tracing = { version = "0.1.25", default-features = false }
-tracing-subscriber = { version = "0.3.16", default-features = false, features = ["env-filter", "fmt"] }
-url = { version = "2.2.1", default-features = false }
-walkdir = { version = "2.3.2", default-features = false }
+clap = { version = "4.5.20", features = ["derive", "string", "wrap_help"] }
+color-eyre = "0.6.3"
+# https://github.com/theduke/crates-io-api/pull/74 adds support for ids[] query parameter
+crates_io_api = { version = "0.11.0", git = "https://github.com/theduke/crates-io-api/", rev = "refs/pull/74/head" }
+serde = { version = "1.0.210", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.128", default-features = false }
+tempfile = { version = "3.13.0", default-features = false }
+toml = { version = "0.8.19", default-features = false, features = ["parse"] }
+tracing = { version = "0.1.40", default-features = false }
+tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+    "ansi",
+    "env-filter",
+    "fmt",
+] }
+walkdir = { version = "2.5.0", default-features = false }

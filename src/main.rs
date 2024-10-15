@@ -1,8 +1,11 @@
-use argh::FromArgs;
-use reqwest::blocking::Client;
+use clap::{
+    builder::{styling::AnsiColor, Styles},
+    Parser,
+};
+use color_eyre::{eyre::bail, Result};
+use crates_io_api::{Crate, CratesQuery, ReverseDependencies, SyncClient};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     env,
     ffi::OsStr,
     fs::{self, File},
@@ -10,25 +13,21 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
+    time::Duration,
 };
 use tempfile::TempDir;
-use tracing::{info, trace};
-use url::Url;
+use tracing::{info, level_filters::LevelFilter, trace};
+use tracing_subscriber::EnvFilter;
 use walkdir::WalkDir;
 
-const API_BASE: &str = "https://crates.io/api/v1/";
-
-type Error = Box<dyn std::error::Error>;
-type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PatchArg {
     name: String,
     path: PathBuf,
 }
 
 impl FromStr for PatchArg {
-    type Err = Error;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (name, path) = s
@@ -41,89 +40,66 @@ impl FromStr for PatchArg {
     }
 }
 
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Blue.on_default().bold())
+    .usage(AnsiColor::Blue.on_default().bold())
+    .literal(AnsiColor::White.on_default())
+    .placeholder(AnsiColor::Green.on_default());
+
 /// Test reverse dependencies with an updated crate version
-#[derive(Debug, FromArgs)]
-struct CommandLineOpts {
+#[derive(Debug, Parser)]
+#[clap(styles = HELP_STYLES)]
+struct Opts {
     /// the name of the crate to crater
-    #[argh(positional)]
     crate_name: String,
 
     /// the version of the crate to look for reverse dependencies
     /// of. Performs simple substring comparison
-    #[argh(option)]
+    #[arg(long, short)]
     version: String,
 
     /// the crate name and path to use to patch, formatted as `name=path`
-    #[argh(option)]
+    #[arg(long, short)]
     patch: Vec<PatchArg>,
 
     /// the directory to compile in.
-    #[argh(option, default = "TempDir::new().unwrap().into_path()")]
+    #[arg(long, short, default_value = TempDir::new().unwrap().path().to_string_lossy().to_string())]
     working_dir: PathBuf,
 
     /// checkout the repository for dependant instead of using a
     /// released version
-    #[argh(switch)]
+    #[arg(long, short = 'g')]
     use_git: bool,
 
     /// alternate command to run as the first step
-    #[argh(option)]
+    #[arg(long, alias = "pre")]
     pre_command: Option<String>,
 
     /// alternate command to run as the second step
-    #[argh(option)]
+    #[arg(long, alias = "post")]
     post_command: Option<String>,
-}
 
-struct Opts {
-    api_base: Url,
-    crate_name: String,
-    version: String,
-    patch: Vec<PatchArg>,
-    working_dir: PathBuf,
-    use_git: bool,
-    pre_command: Option<String>,
-    post_command: Option<String>,
-}
-
-impl Opts {
-    fn enhance(cmd: CommandLineOpts) -> Result<Self> {
-        let api_base = Url::parse(API_BASE)?;
-        let CommandLineOpts {
-            crate_name,
-            version,
-            patch,
-            working_dir,
-            use_git,
-            pre_command,
-            post_command,
-        } = cmd;
-        Ok(Self {
-            api_base,
-            crate_name,
-            version,
-            patch,
-            working_dir,
-            use_git,
-            pre_command,
-            post_command,
-        })
-    }
+    /// dry run, don't actually run the experiments
+    #[arg(long, short = 'n')]
+    dry_run: bool,
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    color_eyre::install()?;
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+
+    let opts = Opts::parse();
+
     let original_dir = env::current_dir()?;
-
-    let opts = Opts::enhance(argh::from_env())?;
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("mini-crater")
-        .build()?;
-
     info!("Working in {}", opts.working_dir.display());
 
-    setup_cargo_config(&opts)?;
+    let rate_limit = Duration::from_secs(1);
+    let client = crates_io_api::SyncClient::new("mini-crater", rate_limit)?;
+
+    setup_cargo_config(&opts.working_dir)?;
 
     let reverse_dependencies = fetch_reverse_dependencies(&opts, &client)?;
     // dbg!(&reverse_dependencies);
@@ -140,19 +116,14 @@ fn main() -> Result<()> {
         opts.version,
     );
 
-    let all_info = fetch_crate_info(&opts, &client, &name_and_download_counts)?;
+    let mut crates = fetch_crate_info(&opts, &client, &name_and_download_counts)?;
     // dbg!(&all_info);
     info!(
         "Found {} reverse dependencies with full information ({} with repositories)",
-        all_info.crates.len(),
-        all_info
-            .crates
-            .iter()
-            .filter(|c| c.repository.is_some())
-            .count(),
+        crates.len(),
+        crates.iter().filter(|c| c.repository.is_some()).count(),
     );
 
-    let mut crates = all_info.crates;
     crates.sort_by_key(|c| c.downloads);
     crates.reverse();
     let statistics = run_experiment(&opts, &crates)?;
@@ -166,104 +137,28 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Use a shared target directory to reduce (but not eliminate) disk
-/// space usage and needless rebuilds.
-fn setup_cargo_config(opts: &Opts) -> Result<()> {
-    let dir = opts.working_dir.join(".cargo");
+/// Use a shared target directory to reduce (but not eliminate) disk space usage and needless
+/// rebuilds.
+fn setup_cargo_config(working_dir: &Path) -> Result<()> {
+    let dir = working_dir.join(".cargo");
     fs::create_dir_all(&dir)?;
 
-    let path = dir.join("config");
+    let path = dir.join("config.toml");
     let config = format!(
         "[build]
          target-dir = '{}/target'",
-        opts.working_dir.display(),
+        working_dir.display(),
     );
 
     fs::write(path, config).map_err(Into::into)
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct ReverseDependencies {
-    dependencies: Vec<Dependency>,
-    versions: Vec<Version>,
-    meta: Meta,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Dependency {
-    id: u64,
-    version_id: u64,
-    req: String, // ^0.6.10
-    downloads: u64,
-
-    #[serde(flatten)]
-    _other: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Version {
-    id: u64,
-    #[serde(rename = "crate")]
-    name: String,
-    num: String,
-    downloads: u64,
-
-    #[serde(flatten)]
-    _other: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct Meta {
-    total: u64,
-
-    #[serde(flatten)]
-    _other: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReverseDependenciesQuery {
-    page: u64,
-    per_page: u64, // max of 100
-}
-
 /// Find all crates that use the target crate
-fn fetch_reverse_dependencies(opts: &Opts, client: &Client) -> Result<ReverseDependencies> {
+fn fetch_reverse_dependencies(opts: &Opts, client: &SyncClient) -> Result<ReverseDependencies> {
     let cache_file = opts.working_dir.join("reverse_dependencies.json");
-
     use_cached_file_or_else(cache_file, || {
-        let mut q = ReverseDependenciesQuery {
-            page: 1,
-            per_page: 100,
-        };
-        let mut fused_reverse_dependencies = ReverseDependencies::default();
-
-        loop {
-            let revdep_path = format!("./crates/{}/reverse_dependencies", &opts.crate_name);
-            let mut revdep_url = opts.api_base.join(&revdep_path)?;
-
-            let qs = serde_urlencoded::to_string(&q)?;
-            revdep_url.set_query(Some(&qs));
-
-            trace!("Making request to {}", revdep_url);
-            let response = client.get(revdep_url).send()?;
-            let mut chunk: ReverseDependencies = serde_json::from_slice(&response.bytes()?)?;
-
-            fused_reverse_dependencies
-                .dependencies
-                .append(&mut chunk.dependencies);
-            fused_reverse_dependencies
-                .versions
-                .append(&mut chunk.versions);
-            fused_reverse_dependencies.meta = chunk.meta;
-
-            if q.page * q.per_page < fused_reverse_dependencies.meta.total {
-                q.page += 1;
-            } else {
-                break;
-            }
-        }
-
-        serde_json::to_vec(&fused_reverse_dependencies).map_err(Into::into)
+        let reverse_dependencies = client.crate_reverse_dependencies(&opts.crate_name)?;
+        serde_json::to_vec(&reverse_dependencies).map_err(Into::into)
     })
 }
 
@@ -282,72 +177,39 @@ fn compute_name_and_download_counts(
 ) -> Vec<NameAndDownloadCount> {
     let ReverseDependencies {
         dependencies,
-        versions,
         meta: _,
     } = reverse_dependencies;
-    let mut version_map: BTreeMap<_, _> = versions.into_iter().map(|v| (v.id, v)).collect();
 
     // TODO: better semver string application
     dependencies
         .into_iter()
-        .filter(|d| d.req.contains(&opts.version))
-        .map(|d| {
-            let version = version_map
-                .remove(&d.version_id)
-                .expect("Version key was missing");
-            let name = version.name;
-            let downloads = d.downloads;
-
-            NameAndDownloadCount { name, downloads }
+        .filter(|d| d.dependency.req.contains(&opts.version))
+        .map(|d| NameAndDownloadCount {
+            name: d.crate_version.crate_name,
+            downloads: d.crate_version.downloads,
         })
         .collect()
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct CrateInfo {
-    crates: Vec<Crate>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Crate {
-    name: String,
-    max_version: String,
-    downloads: u64,
-    repository: Option<String>,
-
-    #[serde(flatten)]
-    _other: BTreeMap<String, serde_json::Value>,
 }
 
 /// Gets the full information for the crates, including the repository link
 fn fetch_crate_info(
     opts: &Opts,
-    client: &Client,
+    client: &SyncClient,
     name_and_download_counts: &[NameAndDownloadCount],
-) -> Result<CrateInfo> {
+) -> Result<Vec<Crate>> {
     let cache_file = opts.working_dir.join("full_information.json");
-
+    let mut fused_crate_info = Vec::new();
     use_cached_file_or_else(cache_file, || {
-        let mut fused_crate_info = CrateInfo::default();
-        let crate_url = opts.api_base.join("./crates")?;
-
-        // crates.io limits this to 10 and doesn't handle the paging
-        // quite right, so we do this ourselves.
+        // crates.io limits this to 10 and doesn't handle the paging quite right, so we do this
+        // ourselves.
         for chunk in name_and_download_counts.chunks(10) {
-            let mut crate_url = crate_url.clone();
-            let mut query = crate_url.query_pairs_mut();
-            for info in chunk {
-                query.append_pair("ids[]", &info.name);
-            }
-            drop(query);
-
-            trace!("Making request to {}", crate_url);
-            let response = client.get(crate_url).send()?;
-            let mut chunk: CrateInfo = serde_json::from_slice(&response.bytes()?)?;
-
-            fused_crate_info.crates.append(&mut chunk.crates);
+            let query = CratesQuery::builder()
+                .ids(chunk.iter().map(|c| c.name.clone()).collect())
+                .build();
+            trace!("Making request for {query:?}");
+            let mut response = client.crates(query)?;
+            fused_crate_info.append(&mut response.crates);
         }
-
         serde_json::to_vec(&fused_crate_info).map_err(Into::into)
     })
 }
@@ -409,7 +271,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
 
     for c in crates {
         println!("Beginning experiment for {}", c.name);
-
+        if opts.dry_run {
+            continue;
+        }
         env::set_current_dir(&experiments_dir)?;
 
         // Create our calling project
@@ -581,8 +445,8 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
             cargo_toml_path.display(),
             name
         );
-        let file = fs::read(&cargo_toml_path)?;
-        let cargo_toml: CargoToml = toml::from_slice(&file)?;
+        let file = fs::read_to_string(&cargo_toml_path)?;
+        let cargo_toml: CargoToml = toml::from_str(&file)?;
 
         if let Some(package) = cargo_toml.package {
             if package.name == name {
@@ -592,12 +456,11 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
         }
     }
 
-    Err(format!(
+    bail!(
         "Could not find a suitable Cargo toml for {} in {}",
         name,
         root_dir.display()
     )
-    .into())
 }
 
 fn prepare_command(
