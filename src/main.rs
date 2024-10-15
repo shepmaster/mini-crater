@@ -1,4 +1,7 @@
-use clap::Parser;
+use clap::{
+    builder::{styling::AnsiColor, Styles},
+    Parser,
+};
 use color_eyre::{eyre::bail, Result};
 use crates_io_api::{Crate, CratesQuery, ReverseDependencies, SyncClient};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -36,8 +39,15 @@ impl FromStr for PatchArg {
     }
 }
 
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Blue.on_default().bold())
+    .usage(AnsiColor::Blue.on_default().bold())
+    .literal(AnsiColor::White.on_default())
+    .placeholder(AnsiColor::Green.on_default());
+
 /// Test reverse dependencies with an updated crate version
 #[derive(Debug, Parser)]
+#[clap(styles = HELP_STYLES)]
 struct Opts {
     /// the name of the crate to crater
     crate_name: String,
@@ -57,7 +67,7 @@ struct Opts {
 
     /// checkout the repository for dependant instead of using a
     /// released version
-    #[arg(long, short)]
+    #[arg(long, short = 'g')]
     use_git: bool,
 
     /// alternate command to run as the first step
