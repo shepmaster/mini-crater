@@ -2,9 +2,16 @@ use argh::FromArgs;
 use cargo_util_schemas::manifest::{
     InheritableDependency, PackageName, TomlDependency, TomlDetailedDependency, TomlManifest,
 };
+use futures::{future, FutureExt as _, StreamExt as _, TryStream, TryStreamExt as _};
+use ratatui::{
+    crossterm::event::{self, KeyCode, KeyEventKind},
+    prelude::*,
+    widgets,
+};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::{
     collections::BTreeMap,
     env,
@@ -16,13 +23,16 @@ use std::{
     str::FromStr,
 };
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, trace, warn};
+use tracing_subscriber::{prelude::*, EnvFilter};
 use url::Url;
 use walkdir::WalkDir;
 
 const API_BASE: &str = "https://crates.io/api/v1/";
 
-type Error = Box<dyn std::error::Error>;
+type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone)]
@@ -122,11 +132,636 @@ impl Opts {
     }
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    let original_dir = env::current_dir()?;
+trait SaturateToU16 {
+    fn saturate_to_u16(self) -> u16;
+}
 
+impl SaturateToU16 for usize {
+    fn saturate_to_u16(self) -> u16 {
+        u16::try_from(self).unwrap_or(u16::MAX)
+    }
+}
+
+mod state {
+    use ratatui::{layout::Constraint::*, prelude::*, style::Style, text::Text, widgets};
+    use tui_widgets::scrollview;
+
+    use crate::{SaturateToU16, Trace};
+
+    #[derive(Default)]
+    pub struct Root {
+        pub focus: RootFocus,
+        pub progress: Progress,
+        pub tracing: Tracing,
+    }
+
+    #[derive(Copy, Clone, Default, PartialEq)]
+    pub enum RootFocus {
+        #[default]
+        Progress,
+        Tracing,
+    }
+
+    impl RootFocus {
+        const ALL: [Self; 2] = [Self::Progress, Self::Tracing];
+
+        pub fn nth(&self) -> usize {
+            Self::ALL.iter().position(|v| v == self).unwrap()
+        }
+    }
+
+    #[derive(Default)]
+    pub enum Progress {
+        #[default]
+        Initialized,
+
+        RunExperiments(RunExperiments),
+    }
+
+    pub struct RunExperiments {
+        pub experiments: Vec<RunExperiment>,
+        pub focus: RunExperimentsFocus,
+        pub crate_list: widgets::ListState,
+    }
+
+    impl RunExperiments {
+        pub fn new(crates: Vec<super::Crate>) -> Self {
+            let experiments = crates
+                .into_iter()
+                .map(|c| RunExperiment {
+                    name: c.name,
+                    progress: Default::default(),
+                    original_output: Default::default(),
+                    output: Default::default(),
+                    crate_detail: Default::default(),
+                })
+                .collect();
+
+            Self {
+                experiments,
+                focus: Default::default(),
+                crate_list: Default::default(),
+            }
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, Default, PartialEq)]
+    pub enum RunExperimentsFocus {
+        #[default]
+        List,
+        Detail,
+    }
+
+    impl RunExperimentsFocus {
+        const ALL: [Self; 2] = [Self::List, Self::Detail];
+
+        pub fn next(&self) -> Self {
+            Self::ALL
+                .iter()
+                .cycle()
+                .skip_while(|&f| f != self)
+                .nth(1)
+                .copied()
+                .unwrap()
+        }
+
+        pub fn is_list(&self) -> bool {
+            matches!(self, Self::List)
+        }
+
+        pub fn is_detail(&self) -> bool {
+            matches!(self, Self::Detail)
+        }
+    }
+
+    impl widgets::Widget for &mut RunExperiments {
+        fn render(self, area: Rect, buf: &mut Buffer) {
+            let RunExperiments {
+                experiments,
+                focus,
+                crate_list,
+            } = self;
+
+            let symbol = ">>";
+            // Doesn't handle UTF-8...
+            let name_width = experiments
+                .iter()
+                .map(|e| e.name.len())
+                .max()
+                .unwrap_or(0)
+                .saturate_to_u16();
+            let border_width = 2;
+            let symbol_width = symbol.len().saturate_to_u16();
+            let right_padding = symbol_width;
+            let name_width = name_width + border_width + symbol_width + right_padding;
+
+            let [left, right] = Layout::horizontal([Max(name_width), Fill(1)]).areas(area);
+
+            let selected_border = |selected| {
+                if selected {
+                    widgets::BorderType::Double
+                } else {
+                    widgets::BorderType::Plain
+                }
+            };
+
+            let left_block = widgets::Block::bordered()
+                .border_type(selected_border(focus.is_list()))
+                .title("Crates");
+
+            let crates = widgets::List::new(&*experiments)
+                .block(left_block)
+                .highlight_symbol(symbol)
+                .highlight_spacing(widgets::HighlightSpacing::Always);
+
+            StatefulWidget::render(crates, left, buf, crate_list);
+
+            let right_block = widgets::Block::bordered()
+                .border_type(selected_border(focus.is_detail()))
+                .title("Details");
+            let right_inner = right_block.inner(right);
+
+            right_block.render(right, buf);
+
+            match crate_list.selected().and_then(|i| experiments.get_mut(i)) {
+                Some(experiment) => experiment.render(right_inner, buf),
+
+                None => {
+                    let details = widgets::Paragraph::new("Select an experiment");
+                    details.render(right_inner, buf);
+                }
+            };
+        }
+    }
+
+    pub struct RunExperiment {
+        pub name: String,
+        pub progress: RunExperimentProgress,
+        pub original_output: RunExperimentOutput,
+        pub output: RunExperimentOutput,
+        pub crate_detail: scrollview::ScrollViewState,
+    }
+
+    impl widgets::Widget for &mut RunExperiment {
+        fn render(self, area: Rect, buf: &mut Buffer) {
+            let RunExperiment {
+                original_output,
+                output,
+                crate_detail,
+                ..
+            } = self;
+
+            fn one_output(output: &RunExperimentOutput) -> [widgets::Paragraph<'_>; 2] {
+                [
+                    widgets::Paragraph::new(&*output.stdout)
+                        .block(widgets::Block::bordered().title("Stdout")),
+                    widgets::Paragraph::new(&*output.stderr)
+                        .block(widgets::Block::bordered().title("Stderr")),
+                ]
+            }
+            let [a, b] = one_output(original_output);
+            let [c, d] = one_output(output);
+
+            let widgets = [a, b, c, d];
+            let width = widgets
+                .each_ref()
+                .iter()
+                .map(|p| p.line_width())
+                .max()
+                .unwrap_or(0)
+                .saturate_to_u16();
+            let heights = widgets
+                .each_ref()
+                .map(|p| p.line_count(width).saturate_to_u16());
+            let height = heights.iter().sum();
+
+            let width = u16::max(width, area.width);
+            let height = u16::max(height, area.height);
+
+            let size = Size { width, height };
+            let mut sv = scrollview::ScrollView::new(size);
+
+            let layouts = Layout::vertical(heights.map(Constraint::Length)).areas::<4>(sv.area());
+
+            for (w, l) in widgets.iter().zip(layouts) {
+                sv.render_widget(w, l);
+            }
+
+            sv.render(area, buf, crate_detail);
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, Default)]
+    pub enum RunExperimentProgress {
+        #[default]
+        Pending,
+        Skipped,
+        Running,
+        Success,
+        OriginalError,
+        Error,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct RunExperimentOutput {
+        pub stdout: String,
+        pub stderr: String,
+    }
+
+    impl RunExperimentOutput {
+        pub fn from_bytes(stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
+            let stdout = String::from_utf8_lossy(&stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr).into_owned();
+
+            Self { stdout, stderr }
+        }
+    }
+
+    impl<'a> From<&'a RunExperiment> for Text<'a> {
+        fn from(value: &'a RunExperiment) -> Self {
+            let mut t = Text::from(&*value.name);
+
+            t = match value.progress {
+                RunExperimentProgress::Pending => t,
+                RunExperimentProgress::Skipped => t.style(Style::new().dim()),
+                RunExperimentProgress::Running => t.style(Style::new().cyan()),
+                RunExperimentProgress::Success => t.style(Style::new().green()),
+                RunExperimentProgress::OriginalError => t.style(Style::new().yellow()),
+                RunExperimentProgress::Error => t.style(Style::new().red()),
+            };
+
+            t
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Tracing {
+        pub traces: Vec<Trace>,
+        pub offset: scrollview::ScrollViewState,
+    }
+
+    impl Tracing {
+        pub fn push(&mut self, t: Trace) {
+            self.traces.push(t);
+        }
+
+        pub fn messages(&self) -> String {
+            self.traces.iter().fold(String::new(), |mut acc, s| {
+                acc.push_str(&s.message);
+                acc.push('\n');
+                acc
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Message {
+    RunExperimentsStart {
+        crates: Vec<Crate>,
+    },
+
+    ExperimentSkip {
+        name: String,
+    },
+
+    ExperimentSetupFailure {
+        name: String,
+    },
+
+    ExperimentSetupSuccess {
+        name: String,
+    },
+
+    ExperimentOriginalOutput {
+        name: String,
+        output: state::RunExperimentOutput,
+    },
+
+    ExperimentOriginalSuccess {
+        name: String,
+    },
+
+    ExperimentOriginalFailure {
+        name: String,
+    },
+
+    ExperimentOutput {
+        name: String,
+        output: state::RunExperimentOutput,
+    },
+
+    ExperimentSuccess {
+        name: String,
+    },
+
+    ExperimentFailure {
+        name: String,
+    },
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let opts = Opts::enhance(argh::from_env())?;
+
+    let (tracing_tx, tracing_rx) = ChannelTracing::new();
+
+    tracing_subscriber::registry()
+        .with(tracing_tx)
+        .with(EnvFilter::from_default_env())
+        .init();
+
+    let terminal_events = event::EventStream::new();
+
+    let (runner_tx, runner_rx) = mpsc::channel(4);
+    let runner = tokio::task::spawn_blocking(|| run(opts, runner_tx));
+
+    let meta_events = {
+        use MetaEvent::*;
+
+        let tracing_rx = ReceiverStream::new(tracing_rx)
+            .map(|e| Ok(Tracing(e)))
+            .chain(future::err("tracing events ended".into()).into_stream());
+        let runner_rx = ReceiverStream::new(runner_rx).map(|e| Ok(Program(e)));
+        let terminal_events = terminal_events.map(|e| Ok(Terminal(e?)));
+        let runner = runner.into_stream().map(|e| Ok(Runner(e??)));
+
+        futures::stream_select!(terminal_events, runner_rx, tracing_rx, runner)
+    };
+
+    tokio::task::spawn_blocking(|| ui(meta_events)).await?
+}
+
+#[derive(Debug)]
+enum MetaEvent {
+    Terminal(event::Event),
+    Program(Message),
+    Tracing(Trace),
+    Runner(()),
+}
+
+fn ui(events: impl TryStream<Ok = MetaEvent, Error = Error> + Unpin) -> Result<()> {
+    let mut terminal = ratatui::init();
+    terminal.clear()?;
+
+    let r = ui_core(&mut terminal, events);
+
+    ratatui::restore();
+
+    r
+}
+
+fn ui_core(
+    terminal: &mut Terminal<impl ratatui::backend::Backend>,
+    mut events: impl TryStream<Ok = MetaEvent, Error = Error> + Unpin,
+) -> Result<()> {
+    let mut state = state::Root::default();
+
+    loop {
+        terminal.draw(|frame| {
+            use ratatui::layout::Constraint::{Length, Min};
+
+            let [top, bottom] = Layout::vertical([Min(0), Length(1)]).areas(frame.area());
+
+            let t = widgets::Tabs::new(vec!["Progress (F1)", "Tracing (F2)"])
+                .highlight_style(Style::default().cyan().bold())
+                .select(state.focus.nth());
+
+            frame.render_widget(t, bottom);
+
+            match &mut state.focus {
+                state::RootFocus::Progress => match &mut state.progress {
+                    state::Progress::Initialized => {
+                        let greeting = widgets::Paragraph::new("Mini-Crater run started. Hang on.");
+                        frame.render_widget(greeting, top);
+                    }
+
+                    state::Progress::RunExperiments(run_experiments) => {
+                        frame.render_widget(run_experiments, top);
+                    }
+                },
+
+                state::RootFocus::Tracing => {
+                    let messages = state.tracing.messages();
+                    let messages = widgets::Paragraph::new(messages);
+
+                    let width = messages.line_width().saturate_to_u16();
+                    let height = messages.line_count(width).saturate_to_u16();
+                    let size = Size { width, height };
+
+                    let mut sv = tui_widgets::scrollview::ScrollView::new(size);
+                    sv.render_widget(messages, sv.area());
+
+                    frame.render_stateful_widget(sv, top, &mut state.tracing.offset);
+                }
+            }
+        })?;
+
+        fn update_experiment(
+            state: &mut state::Root,
+            name: &str,
+            mut f: impl FnMut(&mut state::RunExperiment),
+        ) {
+            if let state::Progress::RunExperiments(e) = &mut state.progress {
+                let state::RunExperiments { experiments, .. } = e;
+                for e in experiments {
+                    if e.name == name {
+                        f(e);
+                    }
+                }
+            }
+        }
+
+        fn update_progress(state: &mut state::Root, name: &str, p: state::RunExperimentProgress) {
+            update_experiment(state, name, |e| e.progress = p);
+        }
+
+        let event = futures::executor::block_on(events.try_next());
+        let event = event?.ok_or("event stream ended")?;
+
+        match event {
+            MetaEvent::Terminal(event) => {
+                if let event::Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') => break,
+                            KeyCode::F(1) => state.focus = state::RootFocus::Progress,
+                            KeyCode::F(2) => state.focus = state::RootFocus::Tracing,
+                            _ => {}
+                        }
+                    }
+
+                    match &mut state.progress {
+                        state::Progress::Initialized => {}
+
+                        state::Progress::RunExperiments(run_experiments) => {
+                            let state::RunExperiments {
+                                experiments,
+                                focus,
+                                crate_list,
+                            } = run_experiments;
+
+                            let experiment =
+                                crate_list.selected().and_then(|i| experiments.get_mut(i));
+
+                            if key.kind == KeyEventKind::Press {
+                                match key.code {
+                                    KeyCode::Tab => *focus = focus.next(),
+                                    _ => {}
+                                }
+
+                                match focus {
+                                    state::RunExperimentsFocus::List => match key.code {
+                                        KeyCode::Down => crate_list.select_next(),
+                                        KeyCode::Up => crate_list.select_previous(),
+                                        _ => {}
+                                    },
+
+                                    state::RunExperimentsFocus::Detail => {
+                                        if let Some(e) = experiment {
+                                            match key.code {
+                                                KeyCode::Down => e.crate_detail.scroll_down(),
+                                                KeyCode::Up => e.crate_detail.scroll_up(),
+                                                KeyCode::PageDown => {
+                                                    e.crate_detail.scroll_page_down()
+                                                }
+                                                KeyCode::PageUp => e.crate_detail.scroll_page_up(),
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if state.focus == state::RootFocus::Tracing && key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Down => state.tracing.offset.scroll_down(),
+                            KeyCode::Up => state.tracing.offset.scroll_up(),
+                            KeyCode::Right => state.tracing.offset.scroll_right(),
+                            KeyCode::Left => state.tracing.offset.scroll_left(),
+                            KeyCode::PageDown => state.tracing.offset.scroll_page_down(),
+                            KeyCode::PageUp => state.tracing.offset.scroll_page_up(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            MetaEvent::Program(message) => {
+                use state::RunExperimentProgress::*;
+
+                match message {
+                    Message::RunExperimentsStart { crates } => {
+                        state.progress =
+                            state::Progress::RunExperiments(state::RunExperiments::new(crates));
+                    }
+
+                    Message::ExperimentSkip { name } => update_progress(&mut state, &name, Skipped),
+
+                    Message::ExperimentSetupFailure { name } => {
+                        update_progress(&mut state, &name, OriginalError)
+                    }
+
+                    Message::ExperimentSetupSuccess { name } => {
+                        update_progress(&mut state, &name, Running)
+                    }
+
+                    Message::ExperimentOriginalOutput { name, output } => {
+                        update_experiment(&mut state, &name, |e| {
+                            e.original_output = output.clone();
+                        });
+                    }
+
+                    Message::ExperimentOriginalSuccess { name } => {
+                        update_progress(&mut state, &name, Running)
+                    }
+
+                    Message::ExperimentOriginalFailure { name } => {
+                        update_progress(&mut state, &name, OriginalError)
+                    }
+
+                    Message::ExperimentOutput { name, output } => {
+                        update_experiment(&mut state, &name, |e| {
+                            e.output = output.clone();
+                        });
+                    }
+
+                    Message::ExperimentSuccess { name } => {
+                        update_progress(&mut state, &name, Success)
+                    }
+
+                    Message::ExperimentFailure { name } => {
+                        update_progress(&mut state, &name, Error)
+                    }
+                }
+            }
+
+            MetaEvent::Tracing(t) => {
+                state.tracing.push(t);
+            }
+
+            MetaEvent::Runner(()) => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct Trace {
+    message: String,
+    fields: BTreeMap<&'static str, String>,
+}
+
+struct ChannelTracing(mpsc::Sender<Trace>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for ChannelTracing {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Collector(Trace);
+
+        impl Collector {
+            fn add(&mut self, name: &'static str, value: String) {
+                if name == "message" {
+                    self.0.message = value;
+                } else {
+                    self.0.fields.insert(name, value);
+                }
+            }
+        }
+
+        impl tracing_subscriber::field::Visit for Collector {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.add(field.name(), value.to_owned());
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.add(field.name(), format!("{value:?}"));
+            }
+        }
+
+        let mut collector = Collector::default();
+        event.record(&mut collector);
+
+        let _ = self.0.blocking_send(collector.0);
+    }
+}
+
+impl ChannelTracing {
+    fn new() -> (Self, mpsc::Receiver<Trace>) {
+        let (t_tx, t_rx) = mpsc::channel(10);
+        (ChannelTracing(t_tx), t_rx)
+    }
+}
+
+fn run(opts: Opts, tx: mpsc::Sender<Message>) -> Result<()> {
+    let original_dir = env::current_dir()?;
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("mini-crater")
@@ -166,8 +801,13 @@ fn main() -> Result<()> {
     let mut crates = all_info.crates;
     crates.sort_by_key(|c| c.downloads);
     crates.reverse();
-    let statistics = run_experiment(&opts, &crates)?;
-    dbg!(&statistics);
+
+    tx.blocking_send(Message::RunExperimentsStart {
+        crates: crates.clone(),
+    })?;
+
+    let statistics = run_experiment(&opts, &crates, &tx)?;
+    // dbg!(&statistics);
 
     env::set_current_dir(original_dir)?;
 
@@ -332,8 +972,8 @@ struct CrateInfo {
     crates: Vec<Crate>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Crate {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Crate {
     name: String,
     max_version: String,
     downloads: u64,
@@ -410,7 +1050,7 @@ struct Statistics {
     experiment_failures: Vec<String>,
 }
 
-fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
+fn run_experiment(opts: &Opts, crates: &[Crate], tx: &mpsc::Sender<Message>) -> Result<Statistics> {
     let mut statistics = Statistics::default();
 
     let experiments_dir = opts.working_dir.join("experiments");
@@ -423,12 +1063,14 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
         if let Some(select) = &opts.select {
             if !select.is_match(&c.name) {
                 trace!("Skipping {} as it does not match the regex", c.name);
+                tx.blocking_send(Message::ExperimentSkip {
+                    name: c.name.clone(),
+                })?;
                 continue;
             }
         }
 
         let c_pkg_name = PackageName::new(c.name.to_owned())?;
-        println!("Beginning experiment for {c_pkg_name}");
 
         env::set_current_dir(&experiments_dir)?;
 
@@ -468,6 +1110,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             (true, None) => {
                 info!("Experiment {c_pkg_name} has no repository to clone");
                 statistics.setup_failures.push(c_pkg_name.to_string());
+                tx.blocking_send(Message::ExperimentSetupFailure {
+                    name: c.name.clone(),
+                })?;
                 continue;
             }
             (false, _) => None,
@@ -494,6 +1139,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                 if !status.success() {
                     info!("Experiment {c_pkg_name} could not clone the repository");
                     statistics.setup_failures.push(c_pkg_name.to_string());
+                    tx.blocking_send(Message::ExperimentSetupFailure {
+                        name: c.name.clone(),
+                    })?;
                     continue;
                 }
             }
@@ -503,6 +1151,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
                 Ok(p) => p,
                 Err(_) => {
                     statistics.setup_failures.push(c_pkg_name.to_string());
+                    tx.blocking_send(Message::ExperimentSetupFailure {
+                        name: c.name.clone(),
+                    })?;
                     continue;
                 }
             };
@@ -532,6 +1183,9 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
         write_cargo_toml(&cargo_toml)?;
 
         statistics.setup_successes.push(c_pkg_name.to_string());
+        tx.blocking_send(Message::ExperimentSetupSuccess {
+            name: c.name.clone(),
+        })?;
 
         let repository_path = repository_info.as_ref().map(|(_, p)| p);
 
@@ -542,12 +1196,24 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             repository_path.as_ref(),
         );
         trace!("Running pre command for experiment {c_pkg_name}: {pre_command:?}");
-        let status = pre_command.status()?;
-        if status.success() {
+        let output = pre_command.output()?;
+
+        tx.blocking_send(Message::ExperimentOriginalOutput {
+            name: c.name.clone(),
+            output: state::RunExperimentOutput::from_bytes(output.stdout, output.stderr),
+        })?;
+
+        if output.status.success() {
             statistics.original_successes.push(c_pkg_name.to_string());
+            tx.blocking_send(Message::ExperimentOriginalSuccess {
+                name: c.name.clone(),
+            })?;
         } else {
             info!("Experiment {c_pkg_name} failed original build");
             statistics.original_failures.push(c_pkg_name.to_string());
+            tx.blocking_send(Message::ExperimentOriginalFailure {
+                name: c.name.clone(),
+            })?;
             continue;
         }
 
@@ -591,12 +1257,24 @@ fn run_experiment(opts: &Opts, crates: &[Crate]) -> Result<Statistics> {
             repository_path.as_ref(),
         );
         trace!("Running post command for experiment {c_pkg_name}: {post_command:?}");
-        let status = post_command.status()?;
-        if status.success() {
+        let output = post_command.output()?;
+
+        tx.blocking_send(Message::ExperimentOutput {
+            name: c.name.clone(),
+            output: state::RunExperimentOutput::from_bytes(output.stdout, output.stderr),
+        })?;
+
+        if output.status.success() {
             statistics.experiment_successes.push(c_pkg_name.to_string());
+            tx.blocking_send(Message::ExperimentSuccess {
+                name: c.name.clone(),
+            })?;
         } else {
             info!("Experiment {c_pkg_name} failed second build");
             statistics.experiment_failures.push(c_pkg_name.to_string());
+            tx.blocking_send(Message::ExperimentFailure {
+                name: c.name.clone(),
+            })?;
             continue;
         }
     }

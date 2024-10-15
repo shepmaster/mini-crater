@@ -8,6 +8,9 @@ edition = "2018"
 [dependencies]
 argh = { version = "0.1.4", default-features = false }
 cargo-util-schemas = { version = "0.5.0", default-features = false }
+crossterm = { version = "0.28.1", default-features = false, features = ["event-stream"] }
+futures = { version = "0.3.31", default-features = false, features = ["async-await", "executor", "std"] }
+ratatui = { version = "0.28.1", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 regex = { version = "1.11.0", default-features = false, features = ["perf", "std"] }
 reqwest = { version = "0.12.8", default-features = false, features = ["blocking", "default-tls"] }
 semver = { version = "1.0.23", default-features = false }
@@ -15,8 +18,11 @@ serde = { version = "1.0.125", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.64", default-features = false }
 serde_urlencoded = { version = "0.7.0", default-features = false }
 tempfile = { version = "3.2.0", default-features = false }
+tokio = { version = "1.40.0", default-features = false, features = ["rt", "macros"] }
+tokio-stream = { version = "0.1.16", default-features = false, features = ["sync"] }
 toml = { version = "0.8.19", default-features = false, features = ["parse"] }
 tracing = { version = "0.1.25", default-features = false }
-tracing-subscriber = { version = "0.3.16", default-features = false, features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3.16", default-features = false, features = ["env-filter", "registry"] }
+tui-widgets = { version = "0.3.0", default-features = false, features = ["scrollview"] }
 url = { version = "2.2.1", default-features = false }
 walkdir = { version = "2.3.2", default-features = false }
