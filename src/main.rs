@@ -1118,7 +1118,7 @@ fn run_experiment(opts: &Opts, crates: &[Crate], tx: &mpsc::Sender<Message>) -> 
             (false, _) => None,
         };
 
-        let dependencies = cargo_toml.dependencies.get_or_insert_default();
+        let dependencies = cargo_toml.dependencies.get_or_insert(Default::default());
         let dep = if let Some((repository_url, repository_path)) = &repository_info {
             trace!("Adding git dependency for experiment {c_pkg_name}");
 
@@ -1217,8 +1217,8 @@ fn run_experiment(opts: &Opts, crates: &[Crate], tx: &mpsc::Sender<Message>) -> 
             continue;
         }
 
-        let dependencies = cargo_toml.dependencies.get_or_insert_default();
-        let patch = cargo_toml.patch.get_or_insert_default();
+        let dependencies = cargo_toml.dependencies.get_or_insert(Default::default());
+        let patch = cargo_toml.patch.get_or_insert(Default::default());
         let patch_crates_io = patch.entry("crates-io".to_owned()).or_default();
 
         for mut p in opts.patch.clone() {
