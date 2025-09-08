@@ -2,7 +2,7 @@ use argh::FromArgs;
 use cargo_util_schemas::manifest::{
     InheritableDependency, PackageName, TomlDependency, TomlDetailedDependency, TomlManifest,
 };
-use futures::{future, FutureExt as _, StreamExt as _, TryStream, TryStreamExt as _};
+use futures::{FutureExt as _, StreamExt as _, TryStream, TryStreamExt as _, future};
 use ratatui::{
     crossterm::event::{self, KeyCode, KeyEventKind},
     prelude::*,
@@ -10,7 +10,7 @@ use ratatui::{
 };
 use regex::Regex;
 use reqwest::blocking::Client;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::convert::TryFrom;
 use std::{
     collections::BTreeMap,
@@ -26,7 +26,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, trace, warn};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 use url::Url;
 use walkdir::WalkDir;
 

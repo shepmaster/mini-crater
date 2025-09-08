@@ -1,7 +1,7 @@
 [package]
 name = "mini-crater"
 version = "0.1.0"
-edition = "2018"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,7 +15,7 @@ regex = { version = "1.11.0", default-features = false, features = ["perf", "std
 reqwest = { version = "0.12.8", default-features = false, features = ["blocking", "default-tls"] }
 semver = { version = "1.0.23", default-features = false }
 serde = { version = "1.0.125", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.64", default-features = false }
+serde_json = { version = "1.0.64", default-features = false, features = ["std"] }
 serde_urlencoded = { version = "0.7.0", default-features = false }
 tempfile = { version = "3.2.0", default-features = false }
 tokio = { version = "1.40.0", default-features = false, features = ["rt", "macros"] }
