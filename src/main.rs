@@ -1301,11 +1301,12 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
         let file = fs::read_to_string(&cargo_toml_path)?;
         let cargo_toml: TomlManifest = toml::from_str(&file)?;
 
-        if let Some(package) = cargo_toml.package {
-            if package.name.as_ref() == name {
-                cargo_toml_path.pop();
-                return Ok(cargo_toml_path);
-            }
+        if let Some(package) = cargo_toml.package
+            && let Some(pkg_name) = package.name
+            && pkg_name.as_ref() == name
+        {
+            cargo_toml_path.pop();
+            return Ok(cargo_toml_path);
         }
     }
 
