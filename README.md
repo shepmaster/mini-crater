@@ -26,9 +26,9 @@ with a locally-modified version of `snafu` and `snafu-derive`.
 
 ```
 mini-crater snafu \
-  --version 0.6 \
-  --patch snafu=/Users/shep/Projects/snafu \
-  --patch snafu-derive=/Users/shep/Projects/snafu/snafu-derive
+  --version 0.8.9 \
+  --patch 'snafu = { path = "/Users/shep/Projects/snafu" }' \
+  --patch 'snafu-derive = { path = "/Users/shep/Projects/snafu/snafu-derive" }'
 ```
 
 ## Applying changes along with the upgrade
@@ -38,9 +38,9 @@ second build step:
 
 ```
 mini-crater snafu \
-  --version 0.6 \
-  --patch snafu=/Users/shep/Projects/snafu \
-  --patch snafu-derive=/Users/shep/Projects/snafu/snafu-derive \
+  --version 0.8.9 \
+  --patch 'snafu = { path = "/Users/shep/Projects/snafu" }' \
+  --patch 'snafu-derive = { path = "/Users/shep/Projects/snafu/snafu-derive" }' \
   --use-git \
   --post-command /tmp/adjust-code.sh
 ```
