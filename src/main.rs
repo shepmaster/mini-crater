@@ -72,7 +72,7 @@ struct CommandLineOpts {
     patch: Vec<PatchArg>,
 
     /// the directory to compile in.
-    #[argh(option, default = "TempDir::new().unwrap().into_path()")]
+    #[argh(option, default = "TempDir::new().unwrap().keep()")]
     working_dir: PathBuf,
 
     /// checkout the repository for dependant instead of using a
