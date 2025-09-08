@@ -622,6 +622,8 @@ fn ui_core(
                                             match key.code {
                                                 KeyCode::Down => e.crate_detail.scroll_down(),
                                                 KeyCode::Up => e.crate_detail.scroll_up(),
+                                                KeyCode::Right => e.crate_detail.scroll_right(),
+                                                KeyCode::Left => e.crate_detail.scroll_left(),
                                                 KeyCode::PageDown => {
                                                     e.crate_detail.scroll_page_down()
                                                 }
