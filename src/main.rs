@@ -13,6 +13,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::convert::TryFrom;
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     env,
     ffi::OsStr,
@@ -159,11 +160,12 @@ mod state {
     pub enum RootFocus {
         #[default]
         Progress,
+        Summary,
         Tracing,
     }
 
     impl RootFocus {
-        const ALL: [Self; 2] = [Self::Progress, Self::Tracing];
+        const ALL: [Self; 3] = [Self::Progress, Self::Summary, Self::Tracing];
 
         pub fn nth(&self) -> usize {
             Self::ALL.iter().position(|v| v == self).unwrap()
@@ -351,7 +353,7 @@ mod state {
         }
     }
 
-    #[derive(Debug, Copy, Clone, Default)]
+    #[derive(Debug, Copy, Clone, Default, PartialOrd, Ord, PartialEq, Eq)]
     pub enum RunExperimentProgress {
         #[default]
         Pending,
@@ -360,6 +362,32 @@ mod state {
         Success,
         OriginalError,
         Error,
+    }
+
+    impl RunExperimentProgress {
+        pub const ALL: [Self; 6] = [
+            Self::Pending,
+            Self::Skipped,
+            Self::Running,
+            Self::Success,
+            Self::OriginalError,
+            Self::Error,
+        ];
+    }
+
+    impl RunExperimentProgress {
+        pub fn name(self) -> &'static str {
+            use RunExperimentProgress::*;
+
+            match self {
+                Pending => "pending",
+                Skipped => "skipped",
+                Running => "running",
+                Success => "success",
+                OriginalError => "error (original)",
+                Error => "error",
+            }
+        }
     }
 
     #[derive(Debug, Clone, Default)]
@@ -523,7 +551,7 @@ fn ui_core(
 
             let [top, bottom] = Layout::vertical([Min(0), Length(1)]).areas(frame.area());
 
-            let t = widgets::Tabs::new(vec!["Progress (F1)", "Tracing (F2)"])
+            let t = widgets::Tabs::new(vec!["Progress (F1)", "Summary (F2)", "Tracing (F3)"])
                 .highlight_style(Style::default().cyan().bold())
                 .select(state.focus.nth());
 
@@ -540,6 +568,30 @@ fn ui_core(
                         frame.render_widget(run_experiments, top);
                     }
                 },
+
+                state::RootFocus::Summary => {
+                    let mut summary = BTreeMap::new();
+
+                    if let state::Progress::RunExperiments(run_experiments) = &state.progress {
+                        for e in &run_experiments.experiments {
+                            *summary.entry(e.progress).or_insert(0) += 1;
+                        }
+                    }
+
+                    let table = widgets::Table::default()
+                        .rows({
+                            state::RunExperimentProgress::ALL.map(|progress| {
+                                let count = summary.get(&progress).copied().unwrap_or_default();
+                                widgets::Row::new([
+                                    Cow::from(progress.name()),
+                                    Cow::from(count.to_string()),
+                                ])
+                            })
+                        })
+                        .widths([Constraint::Fill(1), Constraint::Fill(1)]);
+
+                    frame.render_widget(table, top);
+                }
 
                 state::RootFocus::Tracing => {
                     let messages = state.tracing.messages();
@@ -586,7 +638,8 @@ fn ui_core(
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::F(1) => state.focus = state::RootFocus::Progress,
-                            KeyCode::F(2) => state.focus = state::RootFocus::Tracing,
+                            KeyCode::F(2) => state.focus = state::RootFocus::Summary,
+                            KeyCode::F(3) => state.focus = state::RootFocus::Tracing,
                             _ => {}
                         }
                     }
