@@ -1115,14 +1115,12 @@ fn run_experiment(opts: &Opts, crates: &[Crate], tx: &mpsc::Sender<Message>) -> 
     fs::create_dir_all(&checkouts_dir)?;
 
     for c in crates {
-        if let Some(select) = &opts.select {
-            if !select.is_match(&c.name) {
-                trace!("Skipping {} as it does not match the regex", c.name);
-                tx.blocking_send(Message::ExperimentSkip {
-                    name: c.name.clone(),
-                })?;
-                continue;
-            }
+        if opts.select.as_ref().is_some_and(|s| !s.is_match(&c.name)) {
+            trace!("Skipping {} as it does not match the regex", c.name);
+            tx.blocking_send(Message::ExperimentSkip {
+                name: c.name.clone(),
+            })?;
+            continue;
         }
 
         let c_pkg_name = PackageName::new(c.name.to_owned())?;
@@ -1344,7 +1342,7 @@ fn find_cargo_toml(root_dir: &Path, name: &str) -> Result<PathBuf> {
         .map(|e| e.into_path())
         .filter(|p| {
             p.file_name()
-                .map_or(false, |n| n.eq_ignore_ascii_case("Cargo.toml"))
+                .is_some_and(|n| n.eq_ignore_ascii_case("Cargo.toml"))
         });
 
     for mut cargo_toml_path in cargo_tomls {
