@@ -184,6 +184,7 @@ mod state {
         pub experiments: Vec<RunExperiment>,
         pub focus: RunExperimentsFocus,
         pub crate_list: widgets::ListState,
+        pub show_help: bool,
     }
 
     impl RunExperiments {
@@ -203,6 +204,7 @@ mod state {
                 experiments,
                 focus: Default::default(),
                 crate_list: Default::default(),
+                show_help: Default::default(),
             }
         }
     }
@@ -242,6 +244,7 @@ mod state {
                 experiments,
                 focus,
                 crate_list,
+                show_help,
             } = self;
 
             let symbol = ">>";
@@ -293,6 +296,49 @@ mod state {
                     details.render(right_inner, buf);
                 }
             };
+
+            if *show_help {
+                let keys = [
+                    ("?", "Show or hide this help"),
+                ];
+
+                let max_len = keys
+                    .iter()
+                    .map(|(c, t)| c.len() + 1 + t.len())
+                    .max()
+                    .unwrap_or_default();
+                let max_len = max_len + 2; // padding
+                let max_len = max_len + 2; // border
+                let max_len = max_len.saturate_to_u16();
+
+                let max_height = keys.len() + 2 + 2;
+                let max_height = max_height.saturate_to_u16();
+
+                let [_, area, _] =
+                    Layout::horizontal([Fill(1), Length(max_len), Fill(1)]).areas(area);
+                let [_, area, _] =
+                    Layout::vertical([Fill(1), Length(max_height), Fill(1)]).areas(area);
+
+                widgets::Clear.render(area, buf);
+
+                let help = widgets::Block::bordered()
+                    .padding(widgets::Padding::uniform(1))
+                    .title("Help");
+
+                let key_layout = keys.map(|_| Max(1));
+                let help_inner = help.inner(area);
+                let key_areas = Layout::vertical(key_layout).split(help_inner);
+
+                for (&(c, t), &a) in keys.iter().zip(&*key_areas) {
+                    let [l, _, r] = Layout::horizontal([Max(1), Length(1), Fill(1)]).areas(a);
+                    let help_char = widgets::Paragraph::new(c).bold();
+                    let help_text = widgets::Paragraph::new(t);
+                    help_char.render(l, buf);
+                    help_text.render(r, buf);
+                }
+
+                help.render(area, buf);
+            }
         }
     }
 
@@ -652,6 +698,7 @@ fn ui_core(
                                 experiments,
                                 focus,
                                 crate_list,
+                                show_help,
                             } = run_experiments;
 
                             let experiment =
@@ -659,6 +706,7 @@ fn ui_core(
 
                             if key.kind == KeyEventKind::Press {
                                 match key.code {
+                                    KeyCode::Char('?') => *show_help = !*show_help,
                                     KeyCode::Tab => *focus = focus.next(),
                                     _ => {}
                                 }
