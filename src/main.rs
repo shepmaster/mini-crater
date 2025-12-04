@@ -185,6 +185,7 @@ mod state {
         pub focus: RunExperimentsFocus,
         pub crate_list: widgets::ListState,
         pub show_help: bool,
+        pub show_experiments: ShowExperiments,
     }
 
     impl RunExperiments {
@@ -205,6 +206,35 @@ mod state {
                 focus: Default::default(),
                 crate_list: Default::default(),
                 show_help: Default::default(),
+                show_experiments: Default::default(),
+            }
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, Default, PartialEq)]
+    pub enum ShowExperiments {
+        #[default]
+        All,
+        Errors,
+    }
+
+    impl ShowExperiments {
+        const ALL: [Self; 2] = [Self::All, Self::Errors];
+
+        pub fn next(self) -> Self {
+            Self::ALL
+                .iter()
+                .cycle()
+                .skip_while(|&&s| s != self)
+                .nth(1)
+                .copied()
+                .unwrap()
+        }
+
+        pub fn filter(self, e: &RunExperiment) -> bool {
+            match self {
+                ShowExperiments::All => true,
+                ShowExperiments::Errors => e.is_error(),
             }
         }
     }
@@ -245,6 +275,7 @@ mod state {
                 focus,
                 crate_list,
                 show_help,
+                show_experiments,
             } = self;
 
             let symbol = ">>";
@@ -274,7 +305,12 @@ mod state {
                 .border_type(selected_border(focus.is_list()))
                 .title("Crates");
 
-            let crates = widgets::List::new(&*experiments)
+            let mut experiments = experiments
+                .iter_mut()
+                .filter(|e| show_experiments.filter(e))
+                .collect::<Vec<_>>();
+
+            let crates = widgets::List::new(experiments.iter().map(|x| &**x))
                 .block(left_block)
                 .highlight_symbol(symbol)
                 .highlight_spacing(widgets::HighlightSpacing::Always);
@@ -302,6 +338,7 @@ mod state {
                     ("?", "Show or hide this help"),
                     ("n", "Jump to the next non-success experiment"),
                     ("N", "Jump to the previous non-success experiment"),
+                    ("f", "Select next filter"),
                 ];
 
                 let max_len = keys
@@ -353,6 +390,17 @@ mod state {
     }
 
     impl RunExperiment {
+        pub fn is_error(&self) -> bool {
+            match self.progress {
+                RunExperimentProgress::Pending => true,
+                RunExperimentProgress::Skipped => false,
+                RunExperimentProgress::Running => true,
+                RunExperimentProgress::Success => false,
+                RunExperimentProgress::OriginalError => true,
+                RunExperimentProgress::Error => true,
+            }
+        }
+
         pub fn is_non_success(&self) -> bool {
             match self.progress {
                 RunExperimentProgress::Pending => true,
@@ -714,6 +762,7 @@ fn ui_core(
                                 focus,
                                 crate_list,
                                 show_help,
+                                show_experiments,
                             } = run_experiments;
 
                             let experiment =
@@ -759,6 +808,30 @@ fn ui_core(
                                             if let Some((i, _)) = prev_non_success {
                                                 crate_list.select(Some(i))
                                             }
+                                        }
+                                        KeyCode::Char('f') => {
+                                            let currently_selected = crate_list
+                                                .selected()
+                                                .and_then(|i| {
+                                                    experiments
+                                                        .iter()
+                                                        .filter(|e| show_experiments.filter(e))
+                                                        .nth(i)
+                                                });
+
+                                            *show_experiments = show_experiments.next();
+
+                                            let next =
+                                                currently_selected.and_then(|cs| {
+                                                    experiments
+                                                        .iter()
+                                                        .filter(|e| show_experiments.filter(e))
+                                                        .enumerate()
+                                                        .find(|(_, e)| e.name == cs.name)
+                                                        .map(|(i, _)| i)
+                                                });
+
+                                            crate_list.select(next);
                                         }
                                         _ => {}
                                     },
