@@ -300,6 +300,8 @@ mod state {
             if *show_help {
                 let keys = [
                     ("?", "Show or hide this help"),
+                    ("n", "Jump to the next non-success experiment"),
+                    ("N", "Jump to the previous non-success experiment"),
                 ];
 
                 let max_len = keys
@@ -348,6 +350,19 @@ mod state {
         pub original_output: RunExperimentOutput,
         pub output: RunExperimentOutput,
         pub crate_detail: scrollview::ScrollViewState,
+    }
+
+    impl RunExperiment {
+        pub fn is_non_success(&self) -> bool {
+            match self.progress {
+                RunExperimentProgress::Pending => true,
+                RunExperimentProgress::Skipped => false,
+                RunExperimentProgress::Running => true,
+                RunExperimentProgress::Success => false,
+                RunExperimentProgress::OriginalError => true,
+                RunExperimentProgress::Error => true,
+            }
+        }
     }
 
     impl widgets::Widget for &mut RunExperiment {
@@ -715,6 +730,36 @@ fn ui_core(
                                     state::RunExperimentsFocus::List => match key.code {
                                         KeyCode::Down => crate_list.select_next(),
                                         KeyCode::Up => crate_list.select_previous(),
+                                        KeyCode::Char('n') => {
+                                            let skip_n = crate_list
+                                                .selected()
+                                                .map(|idx| idx + 1)
+                                                .unwrap_or_default();
+
+                                            let next_non_success = experiments
+                                                .iter()
+                                                .enumerate()
+                                                .skip(skip_n)
+                                                .find(|(_, e)| e.is_non_success());
+
+                                            if let Some((i, _)) = next_non_success {
+                                                crate_list.select(Some(i));
+                                            }
+                                        }
+                                        KeyCode::Char('N') => {
+                                            let limit_n = crate_list.selected().unwrap_or_default();
+
+                                            let prev_non_success = experiments
+                                                .iter()
+                                                .enumerate()
+                                                .take(limit_n)
+                                                .rev()
+                                                .find(|(_, e)| e.is_non_success());
+
+                                            if let Some((i, _)) = prev_non_success {
+                                                crate_list.select(Some(i))
+                                            }
+                                        }
                                         _ => {}
                                     },
 
